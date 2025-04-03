@@ -1,4 +1,0 @@
-# Specifies a Dockerfile for chemxpl simulations.
-FROM ubuntu:22.04
-APT libblas-dev liblapack-dev git build-essential
-PIP pyscf git+https://github.com/qml2code/qml2

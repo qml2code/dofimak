@@ -1,47 +1,47 @@
-import glob
-import os
-import subprocess
-from tempfile import TemporaryDirectory
-
-# Filename suffix for files containing format specifications.
-dockerspec_filename_suffix = ".docker_spec"
-
-special_cond_separator = ";"
-
 """
 Flags used to specify what should be included into the docker file. Flags after 'PARENT' are written in order in which commands are added to Dockerfile:
-PARENT      include everything from another docker_spec file. "Circular parenting" does not crash the code.
+PARENT      include everything from another `docker_spec` file. "Circular parenting" does not crash the code.
 FROM        which Docker to start from ("child" supercedes "parent")
-APT         packages that should be installed with apt.
-CONDAV      version of CONDA to be installed (currently does not work, perhaps I don't know enough about conda).
-            Entry in the "child" takes priority over the entry in the parent.
+APT         packages that should be installed with `apt-get`.
+CONDAV      version of CONDA to be installed (currently does not work, perhaps I don't know enough about conda). Entry in the "child" takes priority over the entry in the parent.
 PYTHONV     version of python; "child" takes priority.
-PIP         packages installed with pip. Additional necessary flags can be put with special_cond_separator.
+PIP         packages installed with `pip`. Additional necessary flags can be put with ${special_cond_separator}.
 PIPLAST     packages that should be additionally installed with PIP (e.g. qml's setup.py requires numpy to run, producing bug if put into the 'PIP' section).
 CONDA       packages that should be installed with conda; provided in '${package name}${special_cond_separator}${conda channel}' format.
 PYTHONPATH  python modules installed by copy to PYTHONPATH.
 """
 
+import os
+import shutil
+import subprocess
+from tempfile import TemporaryDirectory
+
+import click
+
+from .passwd_checked_pip import passwd_checked_pip_install_scrname
+from .specifications import dockerspec_filename, get_base_dockerfile_commands, get_list_wconda
+
+special_cond_separator = ";"
+
 parent_flag = "PARENT"
 pythonpath_flag = "PYTHONPATH"
 apt_flag = "APT"
 from_flag = "FROM"
+private_git_flag = "PRIVATE_GIT"
+pip_flag = "PIP"
+piplast_flag = "PIPLAST"
 
 dependency_specifiers = [
     from_flag,
     apt_flag,
     "CONDAV",
     "PYTHONV",
-    "PIP",
-    "PIPLAST",
+    pip_flag,
+    piplast_flag,
     "CONDA",
     pythonpath_flag,
+    private_git_flag,
 ]
-
-contains_miniconda = ["continuumio/miniconda3:4.10.3-alpine"]
-
-# Where most basic commands for Docker are found.
-base_dockerfile_cmd_file = "base_dockerfile_commands.txt"
 
 # Command for normal shell operation.
 login_shell_command = 'SHELL ["/bin/bash", "--login", "-c"]'
@@ -49,35 +49,28 @@ login_shell_command = 'SHELL ["/bin/bash", "--login", "-c"]'
 root_shell_command = ""  # 'SHELL ["/bin/bash", "-c"]'
 
 
-def available_dockers_dir():
-    """
-    The directory where Docker specification files available by default are stored.
-    """
-    return os.path.dirname(__file__)
-
-
-def available_dockers():
-    """
-    Docker specification files available by default.
-    """
-    return [
-        spec_file[:-4]
-        for spec_file in glob.glob(available_dockers_dir() + "/*" + dockerspec_filename_suffix)
-    ]
-
-
-def dockerspec_filename(docker_name, dockerspec_dir=available_dockers_dir()):
-    """
-    Docker specification file corresponding to a Docker file to be created.
-    """
-    return dockerspec_dir + "/" + docker_name + dockerspec_filename_suffix
-
-
 # Command for updating conda.
 conda_update_command = "RUN conda update -n base conda"
 conda_installation_script_name = "Miniconda3-latest-Linux-x86_64.sh"
 internal_installation_files = "/installation_files"
 internal_conda_dir = "/opt/conda"
+
+dockerfile_name = "Dockerfile"
+safe_removal = "wipe"
+
+
+def check_bin_availability(exec_name):
+    assert shutil.which(exec_name) is not None, f"Required command: {exec_name}"
+
+
+def check_login_kwargs(all_dependencies):
+    if private_git_flag not in all_dependencies:
+        return {}, False
+    check_bin_availability(safe_removal)
+    print("Please enter your github.com credentials:")
+    login = click.prompt("account name:")
+    passwd = click.prompt("password:", hide_input=True)
+    return {"login": login, "passwd": passwd}, True
 
 
 def conda_installation_lines(temporary_folder):
@@ -122,10 +115,8 @@ def get_apt_dep_lines(dep_list):
     return [root_shell_command, "RUN apt-get update", l]
 
 
-def get_local_dependencies(docker_name, dockerspec_dir=available_dockers_dir()):
-    spec_filename = dockerspec_filename(docker_name, dockerspec_dir=dockerspec_dir)
-    if not os.path.isfile(spec_filename):
-        raise Exception("Unknown Docker spec filename.")
+def get_local_dependencies(docker_name, dockerspec_dirs=None):
+    spec_filename = dockerspec_filename(docker_name, dockerspec_dirs=dockerspec_dirs)
     processed_lines = open(spec_filename, "r").readlines()
     output = {}
     for l in processed_lines:
@@ -152,10 +143,21 @@ def get_conda_dep_lines(dep_list):
     return output
 
 
-def pip_install_line(comp):
-    l = "RUN pip install"
+def pip_install_line(comp, login=None, passwd=None):
+    is_private = (login is not None) and (passwd is not None)
+    if is_private:
+        l = pip_install_line(["pexpect"]) + "\n"
+    else:
+        l = ""
+    l += "RUN "
+    if is_private:
+        l += passwd_checked_pip_install_scrname
+    else:
+        l += "pip install"
     for c in comp:
         l += " " + c
+    if is_private:
+        l += f" --login {login} --passwd {passwd}"
     return l
 
 
@@ -207,21 +209,21 @@ def get_python_version_specification(dep_list):
 dependency_line_dict = {
     from_flag: get_from_dep_lines,
     apt_flag: get_apt_dep_lines,
-    "PIP": get_pip_dep_lines,
-    "PIPLAST": get_pip_dep_lines,
     "CONDA": get_conda_dep_lines,
+    pip_flag: get_pip_dep_lines,
+    piplast_flag: get_pip_dep_lines,
     pythonpath_flag: get_pythonpath_dep_lines,
     "CONDAV": get_conda_version_specification,
     "PYTHONV": get_python_version_specification,
 }
 
 
-def get_all_dependencies(docker_name, dockerspec_dir=available_dockers_dir()):
+def get_all_dependencies(docker_name, dockerspec_dirs=None):
     cur_imported_id = 0
     dep_dict = {parent_flag: [docker_name]}
     while cur_imported_id != len(dep_dict[parent_flag]):
         to_add = get_local_dependencies(
-            dep_dict[parent_flag][cur_imported_id], dockerspec_dir=dockerspec_dir
+            dep_dict[parent_flag][cur_imported_id], dockerspec_dirs=dockerspec_dirs
         )
         for dep_type, dep_list in to_add.items():
             if dep_type not in dep_dict:
@@ -236,27 +238,23 @@ def get_all_dependencies(docker_name, dockerspec_dir=available_dockers_dir()):
 
 def get_dockerfile_lines_deps(
     docker_name,
-    dockerspec_dir=available_dockers_dir(),
+    dockerspec_dirs=None,
     conda_updated=True,
 ):
-    base_dockerfile_cmd_full_path = dockerspec_dir + "/" + base_dockerfile_cmd_file
-    # Commands basic for leruli-compliant Docker.
-    assert os.path.isfile(base_dockerfile_cmd_full_path), (
-        "directory not found: " + base_dockerfile_cmd_full_path
-    )
     # Temporary directory where necessary files will be dumped.
     temp_dir_obj = TemporaryDirectory(dir=".", delete=False)
     temp_dir = os.path.basename(temp_dir_obj.name)
     # Docker-specific dependencies.
-    all_dependencies = get_all_dependencies(docker_name, dockerspec_dir=dockerspec_dir)
+    all_dependencies = get_all_dependencies(docker_name, dockerspec_dirs=dockerspec_dirs)
     if from_flag not in all_dependencies:
-        raise Exception()
+        raise Exception("Need a base Docker.")
+    login_kwargs, is_private = check_login_kwargs(all_dependencies)
     output = get_from_dep_lines(all_dependencies[from_flag])
-    output += open(base_dockerfile_cmd_full_path, "r").readlines()
+    output += get_base_dockerfile_commands(dockerspec_dirs=dockerspec_dirs)
 
     # Commands run once we set up apt-installable components.
     post_apt_commands = [login_shell_command]
-    if all_dependencies[from_flag][0] not in contains_miniconda:
+    if all_dependencies[from_flag][0] not in get_list_wconda():
         post_apt_commands += conda_installation_lines(temp_dir)
 
     if conda_updated:
@@ -265,10 +263,14 @@ def get_dockerfile_lines_deps(
     if apt_flag not in all_dependencies:
         output += post_apt_commands
 
-    for dep_spec in dependency_specifiers[1:-1]:
+    for dep_spec in dependency_specifiers[1:-2]:
         if dep_spec not in all_dependencies:
             continue
-        output += dependency_line_dict[dep_spec](all_dependencies[dep_spec])
+        if dep_spec in [pip_flag, piplast_flag]:
+            kwargs = login_kwargs
+        else:
+            kwargs = {}
+        output += dependency_line_dict[dep_spec](all_dependencies[dep_spec], **kwargs)
         if dep_spec == apt_flag:
             output += post_apt_commands
 
@@ -280,17 +282,49 @@ def get_dockerfile_lines_deps(
     else:
         copy_reqs = []
         temp_dir = None
-    return output, copy_reqs, temp_dir
+    return output, copy_reqs, temp_dir, is_private
 
 
-def prepare_dockerfile(docker_name, dockerspec_dir=available_dockers_dir()):
-    dlines, copy_reqs, temp_dir = get_dockerfile_lines_deps(
-        docker_name, dockerspec_dir=dockerspec_dir
+def prepare_dockerfile(docker_name, dockerspec_dirs=None):
+    dlines, copy_reqs, temp_dir, private = get_dockerfile_lines_deps(
+        docker_name, dockerspec_dirs=dockerspec_dirs
     )
-    output = open("Dockerfile", "w")
+    output = open(dockerfile_name, "w")
     for l in dlines:
         print(l, file=output)
     output.close()
     if temp_dir is not None:
         for copy_req in copy_reqs:
             subprocess.run(["cp", "-r", get_module_imported_dir(copy_req), temp_dir])
+    return temp_dir, private
+
+
+def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None):
+    check_bin_availability("docker")
+    temp_dir, is_private = prepare_dockerfile(docker_name, dockerspec_dirs=dockerspec_dirs)
+    docker_build_command = ["docker", "image", "build"]
+    if docker_tag is None:
+        docker_tag = f"{docker_name}:1.0"
+    docker_build_command += ["-t", docker_tag]
+    docker_build_command.append(".")
+    print("CREATING THE DOCKER")
+    subprocess.run(docker_build_command)
+    print("CLEANING UP.")
+    if is_private:
+        check_bin_availability(safe_removal)
+        subprocess.run([safe_removal, dockerfile_name])
+    else:
+        os.remove(dockerfile_name)
+    if temp_dir is not None:
+        shutil.rmtree(temp_dir)
+
+
+@click.command()
+@click.argument("docker_name")
+@click.option("--tag", default=None)
+@click.option("--dockerfile", is_flag=True)
+def main(docker_name, tag, dockerfile):
+    if dockerfile:
+        prepare_dockerfile(docker_name)
+        return
+    prepare_image(docker_name, docker_tag=tag)
