@@ -18,7 +18,10 @@ from tempfile import TemporaryDirectory
 
 import click
 
-from .passwd_checked_pip import passwd_checked_pip_install_scrname
+from .passwd_checked_pip import (
+    create_passwd_checked_pip_install,
+    passwd_checked_pip_install_scrname,
+)
 from .specifications import dockerspec_filename, get_base_dockerfile_commands, get_list_wconda
 
 special_cond_separator = ";"
@@ -36,11 +39,11 @@ dependency_specifiers = [
     apt_flag,
     "CONDAV",
     "PYTHONV",
+    private_git_flag,
     pip_flag,
     piplast_flag,
     "CONDA",
     pythonpath_flag,
-    private_git_flag,
 ]
 
 # Command for normal shell operation.
@@ -54,6 +57,7 @@ conda_update_command = "RUN conda update -n base conda"
 conda_installation_script_name = "Miniconda3-latest-Linux-x86_64.sh"
 internal_installation_files = "/installation_files"
 internal_conda_dir = "/opt/conda"
+internal_script_storage = "/misc_scripts"
 
 dockerfile_name = "Dockerfile"
 safe_removal = "wipe"
@@ -108,7 +112,7 @@ def get_from_dep_lines(dep_list):
     return ["FROM " + dep_list[0]]
 
 
-def get_apt_dep_lines(dep_list):
+def get_apt_dep_lines(dep_list, **kwargs):
     l = "RUN apt-get install -y"
     for dep in dep_list:
         l += " " + dep
@@ -129,7 +133,7 @@ def get_local_dependencies(docker_name, dockerspec_dirs=None):
     return output
 
 
-def get_conda_dep_lines(dep_list):
+def get_conda_dep_lines(dep_list, **kwargs):
     output = []
     for dep in dep_list:
         dep_spl = dep.split(special_cond_separator)
@@ -143,15 +147,11 @@ def get_conda_dep_lines(dep_list):
     return output
 
 
-def pip_install_line(comp, login=None, passwd=None):
+def pip_install_line(comp, login=None, passwd=None, **other_kwargs):
     is_private = (login is not None) and (passwd is not None)
+    l = "RUN "
     if is_private:
-        l = pip_install_line(["pexpect"]) + "\n"
-    else:
-        l = ""
-    l += "RUN "
-    if is_private:
-        l += passwd_checked_pip_install_scrname
+        l += f"python {internal_script_storage}/{passwd_checked_pip_install_scrname}"
     else:
         l += "pip install"
     for c in comp:
@@ -161,7 +161,7 @@ def pip_install_line(comp, login=None, passwd=None):
     return l
 
 
-def get_pip_dep_lines(dep_list):
+def get_pip_dep_lines(dep_list, **kwargs):
     no_special_flags = []
     wspecial_flags = []
     for dep in dep_list:
@@ -171,15 +171,15 @@ def get_pip_dep_lines(dep_list):
             no_special_flags.append(dep)
     lines = []
     if no_special_flags:
-        lines.append(pip_install_line(no_special_flags))
+        lines.append(pip_install_line(no_special_flags, **kwargs))
     if wspecial_flags:
         for dep in wspecial_flags:
             dep_spl = dep.split(special_cond_separator)
-            lines.append(pip_install_line(dep_spl))
+            lines.append(pip_install_line(dep_spl, **kwargs))
     return lines
 
 
-def get_module_imported_dir(module_name):
+def get_module_imported_dir(module_name, **kwargs):
     initfile_command = "import " + module_name + "; print(" + module_name + ".__file__)"
     init_file = subprocess.run(
         ["python", "-c", initfile_command], capture_output=True
@@ -206,6 +206,15 @@ def get_python_version_specification(dep_list):
     return ["RUN conda install python=" + dep_list[0]]
 
 
+def get_private_git_dep_lines(dummy_arg, temp_dir=".", **kwargs):
+    assert len(dummy_arg) == 0
+    create_passwd_checked_pip_install(output_dir=temp_dir)
+    return [
+        f"COPY {temp_dir}/{passwd_checked_pip_install_scrname} {internal_script_storage}",
+        pip_install_line("pexpect"),
+    ]
+
+
 dependency_line_dict = {
     from_flag: get_from_dep_lines,
     apt_flag: get_apt_dep_lines,
@@ -215,6 +224,7 @@ dependency_line_dict = {
     pythonpath_flag: get_pythonpath_dep_lines,
     "CONDAV": get_conda_version_specification,
     "PYTHONV": get_python_version_specification,
+    private_git_flag: get_private_git_dep_lines,
 }
 
 
@@ -236,6 +246,18 @@ def get_all_dependencies(docker_name, dockerspec_dirs=None):
     return dep_dict
 
 
+def check_dependency_consistency(all_dependencies, temp_dir="."):
+    kwargs, is_private = check_login_kwargs(all_dependencies)
+    if is_private:
+        kwargs["temp_dir"] = temp_dir
+    if all_dependencies[pip_flag] or all_dependencies[piplast_flag]:
+        if apt_flag not in all_dependencies:
+            all_dependencies[apt_flag] = []
+        if "git" not in all_dependencies[apt_flag]:
+            all_dependencies[apt_flag].append("git")
+    return kwargs, is_private
+
+
 def get_dockerfile_lines_deps(
     docker_name,
     dockerspec_dirs=None,
@@ -246,9 +268,9 @@ def get_dockerfile_lines_deps(
     temp_dir = os.path.basename(temp_dir_obj.name)
     # Docker-specific dependencies.
     all_dependencies = get_all_dependencies(docker_name, dockerspec_dirs=dockerspec_dirs)
+    kwargs, is_private = check_dependency_consistency(all_dependencies, temp_dir=temp_dir)
     if from_flag not in all_dependencies:
         raise Exception("Need a base Docker.")
-    login_kwargs, is_private = check_login_kwargs(all_dependencies)
     output = get_from_dep_lines(all_dependencies[from_flag])
     output += get_base_dockerfile_commands(dockerspec_dirs=dockerspec_dirs)
 
@@ -263,13 +285,9 @@ def get_dockerfile_lines_deps(
     if apt_flag not in all_dependencies:
         output += post_apt_commands
 
-    for dep_spec in dependency_specifiers[1:-2]:
+    for dep_spec in dependency_specifiers[1:-1]:
         if dep_spec not in all_dependencies:
             continue
-        if dep_spec in [pip_flag, piplast_flag]:
-            kwargs = login_kwargs
-        else:
-            kwargs = {}
         output += dependency_line_dict[dep_spec](all_dependencies[dep_spec], **kwargs)
         if dep_spec == apt_flag:
             output += post_apt_commands

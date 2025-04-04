@@ -34,10 +34,10 @@ def cmd_passwd_checked():
     passwd_checked_pip_install(args.packages, login=args.login, passwd=args.passwd)
 
 
-def create_passwd_checked_pip_install():
+def create_passwd_checked_pip_install(output_dir="."):
     source1 = inspect.getsource(passwd_checked_pip_install)
     source2 = inspect.getsource(cmd_passwd_checked)
-    with open(passwd_checked_pip_install_scrname, "w") as f:
+    with open(output_dir + "/" + passwd_checked_pip_install_scrname, "w") as f:
         print(
             f"""
 {source1}
