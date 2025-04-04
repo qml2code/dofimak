@@ -11,10 +11,10 @@ def passwd_checked_pip_install(package_links, login=None, passwd=None, website="
 
     while True:
         try:
-            child.expect(f"Username for 'https://{website}':")
+            child.expect(f"Username for 'https://{website}':", timeout=None)
             assert login is not None, f"ABORTING: Requires {website} username!"
             child.sendline(login)
-            child.expect(f"Password for 'https://{login}@{website}':")
+            child.expect(f"Password for 'https://{login}@{website}':", timeout=None)
             assert passwd is not None, f"ABORTING: Requires {website} password!"
             child.sendline(passwd)
         except EOF:

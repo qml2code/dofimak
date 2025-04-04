@@ -146,11 +146,15 @@ def get_conda_dep_lines(dep_list, **kwargs):
     for dep in dep_list:
         dep_spl = dep.split(special_cond_separator)
         package_name = dep_spl[0]
+        channel_args = ""
         if len(dep_spl) > 1:
             channel_name = dep_spl[1]
-            channel_args = "-c " + channel_name + " "
-        else:
-            channel_args = ""
+            if channel_name:
+                channel_args = "-c " + channel_name + " "
+        if len(dep_spl) > 2:
+            solver_name = dep_spl[2]
+            if solver_name:
+                channel_args += f"--solver={solver_name} "
         output.append("RUN conda install " + channel_args + package_name)
     return output
 
