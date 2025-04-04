@@ -40,9 +40,9 @@ dependency_specifiers = [
     "CONDAV",
     "PYTHONV",
     private_git_flag,
+    "CONDA",
     pip_flag,
     piplast_flag,
-    "CONDA",
     pythonpath_flag,
 ]
 
@@ -71,9 +71,11 @@ def check_login_kwargs(all_dependencies):
     if private_git_flag not in all_dependencies:
         return {}, False
     check_bin_availability(safe_removal)
-    print("Please enter your github.com credentials:")
-    login = click.prompt("account name:")
-    passwd = click.prompt("password:", hide_input=True)
+    print(
+        "Please enter your github.com credentials. (**WARNING**: they will appear in the prepared `Dockerfile`, make sure it's wiped afterwards!)"
+    )
+    login = click.prompt("account name")
+    passwd = click.prompt("password", hide_input=True)
     return {"login": login, "passwd": passwd}, True
 
 
@@ -126,10 +128,16 @@ def get_local_dependencies(docker_name, dockerspec_dirs=None):
     for l in processed_lines:
         lspl = l.split()
         flag = lspl[0]
-        if (flag in dependency_specifiers) or (flag == parent_flag):
-            if flag not in output:
-                output[flag] = []
-            output[flag] += lspl[1:]
+        if not flag:
+            continue
+        if flag[0] == "#":
+            continue
+        assert (flag in dependency_specifiers) or (
+            flag == parent_flag
+        ), f"Dependency flag not found: {flag}"
+        if flag not in output:
+            output[flag] = []
+        output[flag] += lspl[1:]
     return output
 
 
@@ -210,8 +218,8 @@ def get_private_git_dep_lines(dummy_arg, temp_dir=".", **kwargs):
     assert len(dummy_arg) == 0
     create_passwd_checked_pip_install(output_dir=temp_dir)
     return [
-        f"COPY {temp_dir}/{passwd_checked_pip_install_scrname} {internal_script_storage}",
-        pip_install_line("pexpect"),
+        f"COPY {temp_dir}/{passwd_checked_pip_install_scrname} {internal_script_storage}/{passwd_checked_pip_install_scrname}",
+        pip_install_line(["pexpect"]),
     ]
 
 

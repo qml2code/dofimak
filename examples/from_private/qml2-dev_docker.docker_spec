@@ -1,0 +1,4 @@
+# Specifies a Dockerfile for using qml2.
+FROM ubuntu:22.04
+PRIVATE_GIT
+PIP pyscf git+https://github.com/qml2code/qml2-dev
