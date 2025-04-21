@@ -10,8 +10,8 @@ PIPLAST     packages that should be additionally installed with PIP (e.g. qml's 
 CONDA       packages that should be installed with conda; provided in '${package name}${special_cond_separator}${conda channel}' format.
 PYTHONPATH  python modules installed by copy to PYTHONPATH.
 """
-
 import os
+import platform
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
@@ -60,17 +60,45 @@ internal_conda_dir = "/opt/conda"
 internal_script_storage = "/misc_scripts"
 
 dockerfile_name = "Dockerfile"
-safe_removal = "wipe"
+
+linux_safe_removal = "wipe"
+macos_safe_removal = "gwipe"
 
 
-def check_bin_availability(exec_name):
-    assert shutil.which(exec_name) is not None, f"Required command: {exec_name}"
+def get_safe_removal_command():
+    match platform.system():
+        case "Linux":
+            return linux_safe_removal
+        case "Darwin":
+            return macos_safe_removal
+        case "Windows":
+            return None
 
 
-def check_login_kwargs(all_dependencies):
+class BinaryUnavailable(Exception):
+    pass
+
+
+no_safe_removal_warning = f"""No utility for safe removal found (`{linux_safe_removal}` for Linux, `{macos_safe_removal}` for MacOS), making it impossible to wipe Dockerfile after it had been used. The Dockerfile in question will contain your private information and thus should be removed. If you are aware of the risks use the `--nowipe` flag to run the command without safely removing the Dockerfile."""
+
+
+def bin_available(exec_name):
+    return shutil.which(exec_name) is not None
+
+
+def check_bin_availability(exec_name, error_line=None):
+    if (exec_name is None) or (not bin_available(exec_name)):
+        if error_line is None:
+            error_line = f"Command not found: {exec_name}"
+        raise BinaryUnavailable(error_line)
+
+
+def check_login_kwargs(all_dependencies, nowipe=False):
     if private_git_flag not in all_dependencies:
         return {}, False
-    check_bin_availability(safe_removal)
+    if not nowipe:
+        safe_removal = get_safe_removal_command()
+        check_bin_availability(safe_removal, error_line=no_safe_removal_warning)
     print(
         "Please enter your github.com credentials. (**WARNING**: they will appear in the prepared `Dockerfile`, make sure it's wiped afterwards!)"
     )
@@ -258,8 +286,8 @@ def get_all_dependencies(docker_name, dockerspec_dirs=None):
     return dep_dict
 
 
-def check_dependency_consistency(all_dependencies, temp_dir="."):
-    kwargs, is_private = check_login_kwargs(all_dependencies)
+def check_dependency_consistency(all_dependencies, temp_dir=".", nowipe=False):
+    kwargs, is_private = check_login_kwargs(all_dependencies, nowipe=nowipe)
     if is_private:
         kwargs["temp_dir"] = temp_dir
     if all_dependencies[pip_flag] or all_dependencies[piplast_flag]:
@@ -270,17 +298,15 @@ def check_dependency_consistency(all_dependencies, temp_dir="."):
     return kwargs, is_private
 
 
-def get_dockerfile_lines_deps(
-    docker_name,
-    dockerspec_dirs=None,
-    conda_updated=True,
-):
+def get_dockerfile_lines_deps(docker_name, dockerspec_dirs=None, conda_updated=True, nowipe=False):
     # Temporary directory where necessary files will be dumped.
     temp_dir_obj = TemporaryDirectory(dir=".", delete=False)
     temp_dir = os.path.basename(temp_dir_obj.name)
     # Docker-specific dependencies.
     all_dependencies = get_all_dependencies(docker_name, dockerspec_dirs=dockerspec_dirs)
-    kwargs, is_private = check_dependency_consistency(all_dependencies, temp_dir=temp_dir)
+    kwargs, is_private = check_dependency_consistency(
+        all_dependencies, temp_dir=temp_dir, nowipe=nowipe
+    )
     if from_flag not in all_dependencies:
         raise Exception("Need a base Docker.")
     output = get_from_dep_lines(all_dependencies[from_flag])
@@ -315,9 +341,9 @@ def get_dockerfile_lines_deps(
     return output, copy_reqs, temp_dir, is_private
 
 
-def prepare_dockerfile(docker_name, dockerspec_dirs=None):
+def prepare_dockerfile(docker_name, dockerspec_dirs=None, nowipe=False):
     dlines, copy_reqs, temp_dir, private = get_dockerfile_lines_deps(
-        docker_name, dockerspec_dirs=dockerspec_dirs
+        docker_name, dockerspec_dirs=dockerspec_dirs, nowipe=nowipe
     )
     output = open(dockerfile_name, "w")
     for l in dlines:
@@ -329,9 +355,17 @@ def prepare_dockerfile(docker_name, dockerspec_dirs=None):
     return temp_dir, private
 
 
-def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None):
+def attempt_safe_removal(dockerfile_name):
+    safe_removal = get_safe_removal_command()
+    check_bin_availability(safe_removal)
+    subprocess.run([safe_removal, dockerfile_name])
+
+
+def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None, nowipe=False):
     check_bin_availability("docker")
-    temp_dir, is_private = prepare_dockerfile(docker_name, dockerspec_dirs=dockerspec_dirs)
+    temp_dir, is_private = prepare_dockerfile(
+        docker_name, dockerspec_dirs=dockerspec_dirs, nowipe=nowipe
+    )
     docker_build_command = ["docker", "image", "build"]
     if docker_tag is None:
         docker_tag = f"{docker_name}:1.0"
@@ -341,8 +375,10 @@ def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None):
     subprocess.run(docker_build_command)
     print("CLEANING UP.")
     if is_private:
-        check_bin_availability(safe_removal)
-        subprocess.run([safe_removal, dockerfile_name])
+        if nowipe:
+            print("WARNING: Dockerfile contains private data, but not wiped!")
+        else:
+            attempt_safe_removal(dockerfile_name)
     else:
         os.remove(dockerfile_name)
     if temp_dir is not None:
@@ -353,8 +389,9 @@ def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None):
 @click.argument("docker_name")
 @click.option("--tag", default=None)
 @click.option("--dockerfile", is_flag=True)
-def main(docker_name, tag, dockerfile):
+@click.option("--nowipe", is_flag=True)
+def main(docker_name, tag, dockerfile, nowipe):
     if dockerfile:
-        prepare_dockerfile(docker_name)
+        prepare_dockerfile(docker_name, nowipe=True)
         return
-    prepare_image(docker_name, docker_tag=tag)
+    prepare_image(docker_name, docker_tag=tag, nowipe=nowipe)
