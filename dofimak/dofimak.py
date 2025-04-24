@@ -48,8 +48,6 @@ dependency_specifiers = [
 
 # Command for normal shell operation.
 login_shell_command = 'SHELL ["/bin/bash", "--login", "-c"]'
-# Command for root (?) shell operation. Perhaps not needed?
-root_shell_command = ""  # 'SHELL ["/bin/bash", "-c"]'
 
 
 # Command for updating conda.
@@ -143,10 +141,12 @@ def get_from_dep_lines(dep_list):
 
 
 def get_apt_dep_lines(dep_list, **kwargs):
+    if not dep_list:
+        return []
     l = "RUN apt-get install -y"
     for dep in dep_list:
         l += " " + dep
-    return [root_shell_command, "RUN apt-get update", l]
+    return ["RUN apt-get update", l]
 
 
 def get_local_dependencies(docker_name, dockerspec_dirs=None):
@@ -286,14 +286,32 @@ def get_all_dependencies(docker_name, dockerspec_dirs=None):
     return dep_dict
 
 
+def contains_git_repos(dependency_list):
+    for dep in dependency_list:
+        if (len(dep) > 3) and (dep[:3] == "git"):
+            return True
+    return False
+
+
+def get_deps(all_dependencies, flag):
+    if flag in all_dependencies:
+        return all_dependencies[flag]
+    else:
+        return []
+
+
 def check_dependency_consistency(all_dependencies, temp_dir=".", nowipe=False):
     kwargs, is_private = check_login_kwargs(all_dependencies, nowipe=nowipe)
     if is_private:
         kwargs["temp_dir"] = temp_dir
-    if all_dependencies[pip_flag] or all_dependencies[piplast_flag]:
+    pip_deps = get_deps(all_dependencies, pip_flag)
+    piplast_deps = get_deps(all_dependencies, pip_flag)
+    if pip_deps or piplast_deps:
         if apt_flag not in all_dependencies:
             all_dependencies[apt_flag] = []
-        if "git" not in all_dependencies[apt_flag]:
+        if (contains_git_repos(pip_deps) or contains_git_repos(piplast_deps)) and (
+            "git" not in all_dependencies[apt_flag]
+        ):
             all_dependencies[apt_flag].append("git")
     return kwargs, is_private
 
