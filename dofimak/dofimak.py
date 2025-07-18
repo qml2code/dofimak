@@ -169,20 +169,38 @@ def get_local_dependencies(docker_name, dockerspec_dirs=None):
     return output
 
 
+def divide_conda_dep_str(dep_str: str):
+    dep_spl = dep_str.split(special_cond_separator)
+    package_name = dep_spl[0]
+    if len(dep_spl) > 1:
+        channel_name = dep_spl[1]
+    else:
+        channel_name = None
+    if len(dep_spl) > 2:
+        solver_name = dep_spl[2]
+    else:
+        solver_name = None
+    return package_name, channel_name, solver_name
+
+
 def get_conda_dep_lines(dep_list, **kwargs):
-    output = []
+    output = ["RUN conda tos accept"]
+    added_channels = []
     for dep in dep_list:
-        dep_spl = dep.split(special_cond_separator)
-        package_name = dep_spl[0]
+        package_name, channel_name, solver_name = divide_conda_dep_str(dep)
         channel_args = ""
-        if len(dep_spl) > 1:
-            channel_name = dep_spl[1]
-            if channel_name:
-                channel_args = "-c " + channel_name + " "
-        if len(dep_spl) > 2:
-            solver_name = dep_spl[2]
-            if solver_name:
-                channel_args += f"--solver={solver_name} "
+        if channel_name is not None:
+            channel_args = "-c " + channel_name + " "
+            if channel_name not in added_channels:
+                added_channels.append(channel_name)
+                # make sure TOS are accepted for newly added channels
+                # NOTE: there used to be just one "RUN conda tos accept" in the beginning, with other channels' TOS added with "conda tos accept --override-channels --channel CHANNEL". This proved insufficient though.
+                output += [
+                    "RUN conda config --append channels " + channel_name,
+                    "RUN conda tos accept --override-channels --channel " + channel_name,
+                ]
+        if solver_name is not None:
+            channel_args += f"--solver={solver_name} "
         output.append("RUN conda install " + channel_args + package_name)
     return output
 
@@ -238,12 +256,13 @@ def get_pythonpath_dep_lines(dep_list, temp_module_copy_dir):
 
 
 # TODO does not work for some reason.
-def get_conda_version_specification(dep_list):
+def get_conda_version_specification(dep_list, **kwargs):
     return ["RUN conda install anaconda=" + dep_list[0]]
 
 
-def get_python_version_specification(dep_list):
-    return ["RUN conda install python=" + dep_list[0]]
+def get_python_version_specification(dep_list, **kwargs):
+    # NOTE: conda TOS still need to be accepted after the command because it deletes TOS acceptance files
+    return ["RUN conda tos accept", "RUN conda install python=" + dep_list[0]]
 
 
 def get_private_git_dep_lines(dummy_arg, temp_dir=".", **kwargs):
@@ -316,7 +335,9 @@ def check_dependency_consistency(all_dependencies, temp_dir=".", nowipe=False):
     return kwargs, is_private
 
 
-def get_dockerfile_lines_deps(docker_name, dockerspec_dirs=None, conda_updated=True, nowipe=False):
+def get_dockerfile_lines_deps(
+    docker_name, dockerspec_dirs=None, conda_updated=False, nowipe=False
+):
     # Temporary directory where necessary files will be dumped.
     temp_dir_obj = TemporaryDirectory(dir=".", delete=False)
     temp_dir = os.path.basename(temp_dir_obj.name)
@@ -335,6 +356,7 @@ def get_dockerfile_lines_deps(docker_name, dockerspec_dirs=None, conda_updated=T
     if all_dependencies[from_flag][0] not in get_list_wconda():
         post_apt_commands += conda_installation_lines(temp_dir)
 
+    # K.Karan 2025.07.18: TBH I am now not sure why I implemented `conda_updated` option. Also, does not work with latest Conda releases.
     if conda_updated:
         post_apt_commands.append(conda_update_command)
 
@@ -379,7 +401,7 @@ def attempt_safe_removal(dockerfile_name):
     subprocess.run([safe_removal, dockerfile_name])
 
 
-def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None, nowipe=False):
+def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None, nowipe=False, verbose=False):
     check_bin_availability("docker")
     temp_dir, is_private = prepare_dockerfile(
         docker_name, dockerspec_dirs=dockerspec_dirs, nowipe=nowipe
@@ -388,6 +410,8 @@ def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None, nowipe=Fal
     if docker_tag is None:
         docker_tag = f"{docker_name}:1.0"
     docker_build_command += ["-t", docker_tag]
+    if verbose:
+        docker_build_command += ["--progress", "plain"]
     docker_build_command.append(".")
     print("CREATING THE DOCKER")
     subprocess.run(docker_build_command)
@@ -408,8 +432,9 @@ def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None, nowipe=Fal
 @click.option("--tag", default=None)
 @click.option("--dockerfile", is_flag=True)
 @click.option("--nowipe", is_flag=True)
-def main(docker_name, tag, dockerfile, nowipe):
+@click.option("--verbose", is_flag=True)
+def main(docker_name, tag, dockerfile, nowipe, verbose):
     if dockerfile:
         prepare_dockerfile(docker_name, nowipe=True)
         return
-    prepare_image(docker_name, docker_tag=tag, nowipe=nowipe)
+    prepare_image(docker_name, docker_tag=tag, nowipe=nowipe, verbose=verbose)
