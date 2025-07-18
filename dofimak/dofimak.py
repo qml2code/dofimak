@@ -183,18 +183,20 @@ def divide_conda_dep_str(dep_str: str):
     return package_name, channel_name, solver_name
 
 
-def get_conda_dep_lines(dep_list, **kwargs):
-    output = ["RUN conda tos accept"]
-    added_channels = []
+def get_conda_dep_lines(dep_list, no_conda_tos=False, **kwargs):
+    if no_conda_tos:
+        output = []
+    else:
+        output = ["RUN conda tos accept"]
+        added_channels = []
     for dep in dep_list:
         package_name, channel_name, solver_name = divide_conda_dep_str(dep)
         channel_args = ""
         if channel_name is not None:
             channel_args = "-c " + channel_name + " "
-            if channel_name not in added_channels:
+            if (not no_conda_tos) and (channel_name not in added_channels):
                 added_channels.append(channel_name)
                 # make sure TOS are accepted for newly added channels
-                # NOTE: there used to be just one "RUN conda tos accept" in the beginning, with other channels' TOS added with "conda tos accept --override-channels --channel CHANNEL". This proved insufficient though.
                 output += [
                     "RUN conda config --append channels " + channel_name,
                     "RUN conda tos accept --override-channels --channel " + channel_name,
@@ -260,9 +262,12 @@ def get_conda_version_specification(dep_list, **kwargs):
     return ["RUN conda install anaconda=" + dep_list[0]]
 
 
-def get_python_version_specification(dep_list, **kwargs):
-    # NOTE: conda TOS still need to be accepted after the command because it deletes TOS acceptance files
-    return ["RUN conda tos accept", "RUN conda install python=" + dep_list[0]]
+def get_python_version_specification(dep_list, no_conda_tos=False, **kwargs):
+    output = ["RUN conda install python=" + dep_list[0]]
+    if not no_conda_tos:
+        # NOTE: conda TOS still need to be accepted after the command because it deletes TOS acceptance files
+        output = ["RUN conda tos accept"] + output
+    return output
 
 
 def get_private_git_dep_lines(dummy_arg, temp_dir=".", **kwargs):
@@ -336,7 +341,7 @@ def check_dependency_consistency(all_dependencies, temp_dir=".", nowipe=False):
 
 
 def get_dockerfile_lines_deps(
-    docker_name, dockerspec_dirs=None, conda_updated=False, nowipe=False
+    docker_name, dockerspec_dirs=None, conda_updated=False, nowipe=False, no_conda_tos=False
 ):
     # Temporary directory where necessary files will be dumped.
     temp_dir_obj = TemporaryDirectory(dir=".", delete=False)
@@ -346,6 +351,7 @@ def get_dockerfile_lines_deps(
     kwargs, is_private = check_dependency_consistency(
         all_dependencies, temp_dir=temp_dir, nowipe=nowipe
     )
+    kwargs = {**kwargs, "no_conda_tos": no_conda_tos}
     if from_flag not in all_dependencies:
         raise Exception("Need a base Docker.")
     output = get_from_dep_lines(all_dependencies[from_flag])
@@ -381,9 +387,9 @@ def get_dockerfile_lines_deps(
     return output, copy_reqs, temp_dir, is_private
 
 
-def prepare_dockerfile(docker_name, dockerspec_dirs=None, nowipe=False):
+def prepare_dockerfile(docker_name, dockerspec_dirs=None, nowipe=False, no_conda_tos=False):
     dlines, copy_reqs, temp_dir, private = get_dockerfile_lines_deps(
-        docker_name, dockerspec_dirs=dockerspec_dirs, nowipe=nowipe
+        docker_name, dockerspec_dirs=dockerspec_dirs, nowipe=nowipe, no_conda_tos=no_conda_tos
     )
     output = open(dockerfile_name, "w")
     for l in dlines:
@@ -401,10 +407,17 @@ def attempt_safe_removal(dockerfile_name):
     subprocess.run([safe_removal, dockerfile_name])
 
 
-def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None, nowipe=False, verbose=False):
+def prepare_image(
+    docker_name,
+    dockerspec_dirs=None,
+    docker_tag=None,
+    nowipe=False,
+    verbose=False,
+    no_conda_tos=False,
+):
     check_bin_availability("docker")
     temp_dir, is_private = prepare_dockerfile(
-        docker_name, dockerspec_dirs=dockerspec_dirs, nowipe=nowipe
+        docker_name, dockerspec_dirs=dockerspec_dirs, nowipe=nowipe, no_conda_tos=no_conda_tos
     )
     docker_build_command = ["docker", "image", "build"]
     if docker_tag is None:
@@ -433,8 +446,11 @@ def prepare_image(docker_name, dockerspec_dirs=None, docker_tag=None, nowipe=Fal
 @click.option("--dockerfile", is_flag=True)
 @click.option("--nowipe", is_flag=True)
 @click.option("--verbose", is_flag=True)
-def main(docker_name, tag, dockerfile, nowipe, verbose):
+@click.option("--no_conda_tos", is_flag=True)
+def main(docker_name, tag, dockerfile, nowipe, verbose, no_conda_tos):
     if dockerfile:
-        prepare_dockerfile(docker_name, nowipe=True)
+        prepare_dockerfile(docker_name, nowipe=True, no_conda_tos=no_conda_tos)
         return
-    prepare_image(docker_name, docker_tag=tag, nowipe=nowipe, verbose=verbose)
+    prepare_image(
+        docker_name, docker_tag=tag, nowipe=nowipe, verbose=verbose, no_conda_tos=no_conda_tos
+    )
