@@ -16,34 +16,36 @@ special_cond_separator = ";"
 base_dockerfile_cmd_file = "base_dockerfile_commands.txt"
 
 
-def available_specification_dirs(dockerspec_dirs=None):
+def available_specification_dirs(dockerspec_dirs=None, cwd=None):
     """
     Directories where Dockerfile specifications can be found.
     """
     if dockerspec_dirs is not None:
         return dockerspec_dirs
-    output_dirs = [os.getcwd()]
+    if cwd is None:
+        cwd = os.getcwd()
+    output_dirs = [cwd]
     if specdir_env_name in os.environ:
         output_dirs += os.environ[specdir_env_name].split(":")
     output_dirs.append(os.path.dirname(__file__))
     return output_dirs
 
 
-def available_dockers(dockerspec_dirs=None):
+def available_dockers(dockerspec_dirs=None, cwd=None):
     """
     Docker specification files available by default.
     """
     output = []
-    for d in available_specification_dirs(dockerspec_dirs):
+    for d in available_specification_dirs(dockerspec_dirs, cwd=cwd):
         output += [
             spec_file[:-4] for spec_file in glob.glob(d + "/*" + dockerspec_filename_suffix)
         ]
 
 
-def find_spec_file(filename, dockerspec_dirs=None, find_all=False):
+def find_spec_file(filename, dockerspec_dirs=None, find_all=False, cwd=None):
     if find_all:
         output = []
-    for dockspec_dir in available_specification_dirs(dockerspec_dirs):
+    for dockspec_dir in available_specification_dirs(dockerspec_dirs, cwd=cwd):
         cur_name = dockspec_dir + "/" + filename
         if os.path.isfile(cur_name):
             if find_all:
@@ -55,22 +57,22 @@ def find_spec_file(filename, dockerspec_dirs=None, find_all=False):
     raise Exception(f"File not found: {filename}")
 
 
-def dockerspec_filename(docker_name, dockerspec_dirs=None):
+def dockerspec_filename(docker_name, dockerspec_dirs=None, cwd=None):
     """
     Docker specification file corresponding to a Docker file to be created.
     """
-    return find_spec_file(docker_name + dockerspec_filename_suffix, dockerspec_dirs)
+    return find_spec_file(docker_name + dockerspec_filename_suffix, dockerspec_dirs, cwd=cwd)
 
 
-def get_list_wconda(dockerspec_dirs=None):
+def get_list_wconda(dockerspec_dirs=None, cwd=None):
     output = []
     for total_filename in find_spec_file(
-        containers_wconda_filename, dockerspec_dirs, find_all=True
+        containers_wconda_filename, dockerspec_dirs, find_all=True, cwd=cwd
     ):
         output += [l.strip() for l in open(total_filename, "r").readlines()]
     return output
 
 
-def get_base_dockerfile_commands(dockerspec_dirs=None):
-    total_filename = find_spec_file(base_dockerfile_cmd_file, dockerspec_dirs)
+def get_base_dockerfile_commands(dockerspec_dirs=None, cwd=None):
+    total_filename = find_spec_file(base_dockerfile_cmd_file, dockerspec_dirs, cwd=cwd)
     return [l.strip() for l in open(total_filename, "r").readlines()]
