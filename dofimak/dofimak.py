@@ -314,6 +314,35 @@ def extract_pyproject_github_deps(cloned_dir):
     return new_deps
 
 
+def github_link_from_url(repo_url):
+    # TODO: add more options here as needed.
+    if "https://github.com" in repo_url:
+        specifier = repo_url.split(".com")[1]
+        return "git@github.com:" + specifier
+    else:
+        return repo_url
+
+
+def get_clone_command(repo_url, cloned_dir, branch=None):
+    clone_command = ["git", "clone"]
+    if branch is not None:
+        clone_command += ["--branch", branch]
+    return clone_command + [repo_url, cloned_dir]
+
+
+def clone_repo(repo_url, cloned_dir, branch=None):
+    repo_git_url = github_link_from_url(repo_url)
+    for url in [repo_git_url, repo_url]:
+        print("Attempting to clone:", url)
+        command = get_clone_command(url, cloned_dir, branch=branch)
+        completed_process = subprocess.run(command)
+        if completed_process.returncode == 0:
+            return
+    raise Exception(
+        f"FAILED CLONING THE REPO: {repo_url}\nCONSIDER CHECKING YOUR ACCESS PRIVILEGES!"
+    )
+
+
 def process_pip_github_dep(dep, dep_list, git_repo_branches, temp_dir, cloned_repos):
     repo_name, url, branch = extract_github_info(dep)
     cloned_dir = temp_dir + "/" + repo_name
@@ -322,10 +351,7 @@ def process_pip_github_dep(dep, dep_list, git_repo_branches, temp_dir, cloned_re
         return
     else:
         git_repo_branches[url] = branch
-    clone_command = ["git", "clone"]
-    if branch is not None:
-        clone_command += ["--branch", branch]
-    subprocess.run(clone_command + [url, cloned_dir])
+    clone_repo(url, cloned_dir, branch=branch)
     new_repo_deps = extract_pyproject_github_deps(cloned_dir)
     for new_repo_dep in new_repo_deps:
         dep_list.append(new_repo_dep)
