@@ -17,6 +17,8 @@ import subprocess
 from tempfile import TemporaryDirectory
 
 import click
+import tomli
+import tomli_w
 
 from .passwd_checked_pip import (
     create_passwd_checked_pip_install,
@@ -49,6 +51,7 @@ dependency_specifiers = [
 # Command for normal shell operation.
 login_shell_command = 'SHELL ["/bin/bash", "--login", "-c"]'
 
+git_url_divisors = ["git+https", "git+ssh"]
 
 # Command for updating conda.
 conda_update_command = "RUN conda update -n base conda"
@@ -258,17 +261,20 @@ def get_conda_dep_lines(dep_list, no_conda_tos=False, separate_conda_deps=False,
 
 
 def extract_github_info(dep):
-    if "git+" in dep:
-        cut_dep = dep.split("git+")[1]
-    else:
-        cut_dep = dep
-    if "@" in cut_dep:
-        url, branch = cut_dep.split("@")
-    else:
-        url = cut_dep
+    spl_dep = dep.split("@")
+    last_field = spl_dep[-1]
+    if "/" in last_field:
         branch = None
-    repo_name = url.split("/")[-1].split(".")[0]
+        url_fields = spl_dep
+    else:
+        branch = last_field
+        url_fields = spl_dep[:-1]
 
+    url = "@".join(url_fields)
+
+    repo_name = url.split("/")[-1]
+    if repo_name[-4:] == ".git":
+        repo_name = repo_name[:-4]
     return repo_name, url, branch
 
 
@@ -286,41 +292,43 @@ def pip_install_line(comp, login=None, passwd=None, **other_kwargs):
 
 
 def is_github_link(dep):
-    return "git+https" in dep
+    return any([div in dep for div in git_url_divisors])
 
 
 def extract_pyproject_github_deps(cloned_dir):
     pyproject_toml_filename = cloned_dir + "/pyproject.toml"
     if not os.path.isfile(pyproject_toml_filename):
         return []
-    subprocess.run(["pyprojectsort", pyproject_toml_filename])
-    new_lines = []
-    new_deps = []
-    reading_dependencies = False
-    for line in open(pyproject_toml_filename, "r").readlines():
-        if reading_dependencies:
-            dep = line.strip().split(",")[0]
-            if is_github_link(dep):
-                new_deps.append(dep[1:-1])
-                continue
-            if dep == "]":
-                reading_dependencies = False
+    pyproject_import = tomli.loads(open(pyproject_toml_filename, "r").read())
+
+    all_deps = pyproject_import["project"]["dependencies"]
+
+    new_git_deps = []
+
+    dep_id = 0
+    while dep_id != len(all_deps):
+        dep = all_deps[dep_id]
+        if is_github_link(dep):
+            new_git_deps.append(dep)
+            del all_deps[dep_id]
         else:
-            if line == "dependencies = [\n":
-                reading_dependencies = True
-        new_lines.append(line)
+            dep_id += 1
+    pyproject_import["project"]["dependencies"] = all_deps
+
+    new_pyproject_text = tomli_w.dumps(pyproject_import)
     with open(pyproject_toml_filename, "w") as f:
-        print("".join(new_lines), file=f)
-    return new_deps
+        print(new_pyproject_text, file=f)
+
+    return new_git_deps
 
 
 def github_link_from_url(repo_url):
     # TODO: add more options here as needed.
-    if "https://github.com" in repo_url:
-        specifier = repo_url.split(".com")[1]
-        return "git@github.com:" + specifier
-    else:
-        return repo_url
+    for div in git_url_divisors:
+        if div in repo_url:
+            specifier = repo_url.split(".com")[1]
+            return "git@github.com:" + specifier
+    return repo_url
 
 
 def get_clone_command(repo_url, cloned_dir, branch=None):
