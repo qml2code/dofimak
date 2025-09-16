@@ -12,11 +12,14 @@ PIPLAST     packages that should be additionally installed with PIP (e.g. qml's 
 CONDA       packages that should be installed with conda; provided in '${package name}${special_cond_separator}${conda channel}' format.
 PYTHONPATH  python modules installed by copy to PYTHONPATH.
 """
+import copy
+
 # TODO check temp_dir deletion
 import os
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
+from typing import List
 
 import click
 import tomli
@@ -24,6 +27,7 @@ import tomli_w
 
 from .dependencies import (
     APTDependency,
+    CondaChannelDependency,
     CondaDependency,
     Dependencies,
     DependenciesSublist,
@@ -31,11 +35,13 @@ from .dependencies import (
     alternative_github_url,
     apt_flag,
     conda_flag,
+    default_yml_file,
     dependency_specifiers,
     from_flag,
     get_all_dependencies,
     pip_flag,
     private_git_flag,
+    yml_flag,
 )
 from .passwd_checked_pip import (
     create_passwd_checked_pip_install,
@@ -74,6 +80,8 @@ def check_login_kwargs(all_dependencies: Dependencies, nowipe=False, dockerfolde
 
 
 def combined_run(command_list):
+    if len(command_list) == 0:
+        return [""]
     return ["RUN " + " &&\\\n    ".join(command_list)]
 
 
@@ -144,6 +152,9 @@ def get_conda_separate_package_installation(
                     "conda config --append channels " + dep.channel_name,
                     "conda tos accept --override-channels --channel " + dep.channel_name,
                 ]
+        if dep.package_name is None:
+            # we just need to add channel TOS
+            continue
         if dep.solver_name is not None:
             channel_args += f"--solver={dep.solver_name} "
         commands.append("conda install " + channel_args + dep.name_wspecifier())
@@ -158,18 +169,20 @@ def get_conda_package_installation(
         added_channels = []
     for dep in dep_list:
         assert isinstance(dep, CondaDependency)
-        installation_group = (dep.channel_name, dep.solver_name)
-        if installation_group in installation_groups:
-            installation_groups[installation_group].append(dep.name_wspecifier())
-        else:
-            installation_groups[installation_group] = [dep.name_wspecifier()]
         if (
             (not no_conda_tos)
             and (dep.channel_name is not None)
             and (dep.channel_name not in added_channels)
         ):
             added_channels.append(dep.channel_name)
-    if no_conda_tos:
+        if dep.package_name is None:
+            continue
+        installation_group = (dep.channel_name, dep.solver_name)
+        if installation_group in installation_groups:
+            installation_groups[installation_group].append(dep.name_wspecifier())
+        else:
+            installation_groups[installation_group] = [dep.name_wspecifier()]
+    if no_conda_tos or len(added_channels) == 0:
         commands = []
     else:
         commands = [
@@ -197,6 +210,14 @@ def get_conda_dep_lines(
     else:
         commands = get_conda_package_installation(dep_list, no_conda_tos=no_conda_tos)
     return combined_run(commands)
+
+
+def get_yml_import_commands(*args, **kwargs):
+    commands = [f"COPY {default_yml_file} {default_yml_file}"]
+    commands += combined_run(
+        [f"conda env update --file {default_yml_file} --prune", f"rm -f {default_yml_file}"]
+    )
+    return commands
 
 
 def pip_install_line(comp, login=None, passwd=None, **other_kwargs):
@@ -259,15 +280,22 @@ def clone_repo(repo_url, cloned_folder, branch=None):
     )
 
 
-def process_pip_cloned_github_dep(dep: PIPDependency, temp_dir):
+def process_pip_cloned_github_dep(dep: PIPDependency, temp_dir, no_git_clone=False):
     cloned_folder = f"{temp_dir}/{dep.package_name}"
-    clone_repo(dep.url, cloned_folder, branch=dep.branch)
-    new_repo_deps = extract_pyproject_github_deps(cloned_folder)
+    if no_git_clone:
+        new_repo_deps = []
+    else:
+        clone_repo(dep.url, cloned_folder, branch=dep.branch)
+        new_repo_deps = extract_pyproject_github_deps(cloned_folder)
     return f"{tmp_repo_src}/{dep.package_name}", cloned_folder, new_repo_deps
 
 
 def get_pip_dep_lines(
-    dep_list: DependenciesSublist[PIPDependency], dockerfolder=False, temp_dir=None, **kwargs
+    dep_list: DependenciesSublist[PIPDependency],
+    dockerfolder=False,
+    temp_dir=None,
+    no_git_clone=False,
+    **kwargs,
 ):
     install_strings = []
     if dockerfolder:
@@ -278,7 +306,7 @@ def get_pip_dep_lines(
         if dep.is_github_link:
             if dockerfolder:
                 dep_install_str, cloned_folder, new_repo_deps = process_pip_cloned_github_dep(
-                    dep, temp_dir
+                    dep, temp_dir, no_git_clone=no_git_clone
                 )
                 copy_folder_tuple = (dep_install_str, cloned_folder)
                 assert copy_folder_tuple not in copy_folder_tuples
@@ -349,6 +377,7 @@ dependency_line_dict = {
     from_flag: get_from_dep_lines,
     apt_flag: get_apt_dep_lines,
     conda_flag: get_conda_dep_lines,
+    yml_flag: get_yml_import_commands,
     pip_flag: get_pip_dep_lines,
     private_git_flag: get_private_git_dep_lines,
 }
@@ -402,11 +431,15 @@ def get_dockerfile_lines_deps(
     separate_conda_deps=False,
     cwd=None,
     conda_present=False,
+    no_git_clone=False,
 ):
     # Temporary directory where necessary files will be dumped.
     if dockerfolder:
         temp_dir = "prerequisites"
-        os.mkdir(temp_dir)
+        if no_git_clone:
+            assert os.path.isdir(temp_dir), f"{temp_dir} should already be created!"
+        else:
+            os.mkdir(temp_dir)
     else:
         temp_dir_obj = TemporaryDirectory(dir=".", delete=False)
         temp_dir = os.path.basename(temp_dir_obj.name)
@@ -420,6 +453,7 @@ def get_dockerfile_lines_deps(
         "separate_conda_deps": separate_conda_deps,
         "dockerfolder": dockerfolder,
         "temp_dir": temp_dir,
+        "no_git_clone": no_git_clone,
     }
     if not all_dependencies.contains_from():
         raise Exception("Need a base Docker.")
@@ -453,6 +487,13 @@ def get_dockerfile_lines_deps(
     return output, temp_dir, is_private
 
 
+def print_lines_to_dockerfile(dlines: List[str]):
+    output = open(dockerfile_name, "w")
+    for l in dlines:
+        print(l, file=output)
+    output.close()
+
+
 def prepare_dockerfile(
     docker_name,
     dockerspec_dirs=None,
@@ -474,17 +515,103 @@ def prepare_dockerfile(
         cwd=cwd,
         conda_present=conda_present,
     )
-    output = open(dockerfile_name, "w")
-    for l in dlines:
-        print(l, file=output)
-    output.close()
-    return temp_dir, private
+    print_lines_to_dockerfile(dlines)
+    return all_dependencies, temp_dir, private
 
 
 def attempt_safe_removal(dockerfile_name):
     safe_removal = get_safe_removal_command()
     check_bin_availability(safe_removal)
     subprocess.run([safe_removal, dockerfile_name])
+
+
+def build_image(docker_name, docker_tag=None, verbose=False):
+    check_bin_availability("docker")
+    docker_build_command = ["docker", "image", "build"]
+    if docker_tag is None:
+        docker_tag = f"{docker_name}:1.0"
+    docker_build_command += ["-t", docker_tag]
+    if verbose:
+        docker_build_command += ["--progress", "plain"]
+    docker_build_command.append(".")
+    return subprocess.run(docker_build_command), docker_tag
+
+
+def filter_non_repo_env_dependencies(all_dependencies: Dependencies, temp_dir=None):
+    """
+    remove all dependencies related to conda and pip that will not be installed from cloned source directories
+    """
+    filtered_dependencies = copy.deepcopy(all_dependencies)
+    # firstly, gather the conda channels for which TOS need to be accepted
+    if conda_flag:
+        unsorted_channel_deps = []
+        for dep in filtered_dependencies[conda_flag]:
+            if dep.channel_name is None:
+                continue
+            channel_dep = CondaChannelDependency(dep.channel_name)
+            unsorted_channel_deps.append(channel_dep)
+        channel_deps = DependenciesSublist()
+        channel_deps.add_dependencies(unsorted_channel_deps)
+        filtered_dependencies[conda_flag] = channel_deps
+
+    # gather the pip packages installed from cloned source folders and remove everything else
+    cloned_repo_packages = []
+    if pip_flag in filtered_dependencies:
+        dep_id = 0
+        while dep_id != len(filtered_dependencies[pip_flag]):
+            cur_dep = filtered_dependencies[pip_flag][dep_id]
+            if cur_dep.is_github_link:
+                cloned_repo_packages.append(cur_dep.package_name)
+                dep_id += 1
+            else:
+                del filtered_dependencies[pip_flag][dep_id]
+    return filtered_dependencies, cloned_repo_packages
+
+
+def redefine_through_yml(
+    all_dependencies: Dependencies,
+    docker_name: str | None = None,
+    docker_tag: str | None = None,
+    verbose: bool = False,
+    yml_file=default_yml_file,
+    temp_dir=None,
+    dockerspec_dirs=None,
+    no_conda_tos=False,
+    conda_present=False,
+):
+    """
+    Make a Docker build directory such that the conda environment is defined through a *.yml file.
+
+    This is done by three steps:
+    1. build a "temporary" Docker.
+    2. export the temporary Docker's base environment into a file.
+    3. Replace all references to conda and pip installations with reference to *.yml, EXCEPT references to packages installed from source downloaded from git.
+
+    Should be run from the Docker build directory.
+    """
+    # clear dependencies defined in the *.yml file.
+    filtered_dependencies, cloned_repo_packages = filter_non_repo_env_dependencies(
+        all_dependencies, temp_dir=temp_dir
+    )
+    # build the docker and export the environment from it.
+    _, docker_tag = build_image(docker_name, docker_tag=docker_tag, verbose=verbose)
+    print(f"*WARNING*: A TEMPORARY DOCKER HAS BEEN BUILT: {docker_tag}")
+    filtered_dependencies.import_yml_from_docker(docker_tag)
+
+    yml_dep = filtered_dependencies[yml_flag][0]
+    yml_dep.clear_packages(cloned_repo_packages)
+    yml_dep.dump_to_yml(yml_file)
+
+    dlines, _, _ = get_dockerfile_lines_deps(
+        filtered_dependencies,
+        dockerspec_dirs=dockerspec_dirs,
+        no_conda_tos=no_conda_tos,
+        no_git_clone=True,
+        conda_present=conda_present,
+        dockerfolder=True,
+    )
+    # print the new dockerfile
+    print_lines_to_dockerfile(dlines)
 
 
 def prepare_image(
@@ -497,8 +624,7 @@ def prepare_image(
     separate_conda_deps=False,
     conda_present=False,
 ):
-    check_bin_availability("docker")
-    temp_dir, is_private = prepare_dockerfile(
+    _, temp_dir, is_private = prepare_dockerfile(
         docker_name,
         dockerspec_dirs=dockerspec_dirs,
         nowipe=nowipe,
@@ -506,15 +632,8 @@ def prepare_image(
         separate_conda_deps=separate_conda_deps,
         conda_present=conda_present,
     )
-    docker_build_command = ["docker", "image", "build"]
-    if docker_tag is None:
-        docker_tag = f"{docker_name}:1.0"
-    docker_build_command += ["-t", docker_tag]
-    if verbose:
-        docker_build_command += ["--progress", "plain"]
-    docker_build_command.append(".")
     print("CREATING THE DOCKER")
-    subprocess.run(docker_build_command)
+    build_image(docker_name, docker_tag=docker_tag, verbose=verbose)
     print("CLEANING UP.")
     if is_private:
         if nowipe:
@@ -537,6 +656,7 @@ def prepare_image(
 @click.option("--no_conda_tos", is_flag=True)
 @click.option("--separate_conda_deps", is_flag=True)
 @click.option("--conda_present", is_flag=True)
+@click.option("--yml_env_definition", is_flag=True)
 def main(
     docker_name,
     tag,
@@ -547,6 +667,7 @@ def main(
     no_conda_tos,
     separate_conda_deps,
     conda_present,
+    yml_env_definition,
 ):
     common_kwargs = {
         "no_conda_tos": no_conda_tos,
@@ -564,7 +685,22 @@ def main(
         ), f"{docker_name} directory already exists, clear it to proceed."
         os.mkdir(docker_name)
         os.chdir(docker_name)
-        prepare_dockerfile(docker_name, dockerfolder=dockerfolder, cwd=cwd, **common_kwargs)
+        all_dependencies, temp_dir, _ = prepare_dockerfile(
+            docker_name,
+            dockerfolder=dockerfolder,
+            cwd=cwd,
+            **common_kwargs,
+        )
+        if yml_env_definition:
+            redefine_through_yml(
+                all_dependencies,
+                docker_name,
+                docker_tag=tag,
+                verbose=verbose,
+                temp_dir=temp_dir,
+                conda_present=conda_present,
+                no_conda_tos=no_conda_tos,
+            )
         os.chdir("..")
         return
     prepare_image(docker_name, docker_tag=tag, nowipe=nowipe, verbose=verbose, **common_kwargs)

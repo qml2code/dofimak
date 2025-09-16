@@ -4,6 +4,7 @@ TODO: Two options that were present originally and could be revived on request:
 2. `PYTHONPATH` flag specifying that a package should be installed by downloading it into a directory in `$PYTHONPATH`. Presently abandoned as all repos we care about have a normal `pyproject.toml` now.
 3. `CONDAV` flag specifying conda version; we mostly switched to dockers with pre-installed condas anyway.
 """
+import subprocess
 from typing import List
 
 from packaging.requirements import Requirement
@@ -14,14 +15,16 @@ parent_flag = "PARENT"
 apt_flag = "APT"
 from_flag = "FROM"
 private_git_flag = "PRIVATE_GIT"
-pip_flag = "PIP"
 conda_flag = "CONDA"
+yml_flag = "YML"
+pip_flag = "PIP"
 
 dependency_specifiers = [
     from_flag,
     apt_flag,
     private_git_flag,
     conda_flag,
+    yml_flag,
     pip_flag,
 ]
 
@@ -114,6 +117,20 @@ class CondaDependency(CondaEnvDependency):
             self.solver_name = None
 
 
+class CondaChannelDependency(CondaDependency):
+    def __init__(self, channel_name):
+        self.channel_name = channel_name
+        self.solver_name = None
+        self.package_name = None
+
+    def __eq__(self, other_dep):
+        assert isinstance(other_dep, type(self))
+        return self.channel_name == other_dep.channel_name
+
+    def merge(self, other_dep):
+        Dependency.merge(self, other_dep)
+
+
 # for dependencies installable by pip
 def alternative_github_url(repo_url):
     # TODO: add more options here as needed.
@@ -172,11 +189,48 @@ class PIPDependency(CondaEnvDependency):
         raise Exception("Unknown URL type.")
 
 
+# name of file used to store *.yml for the environment.
+default_yml_file = "base.yml"
+
+
+class YMLDependency(Dependency):
+    def __init__(self):
+        self.textlines = None
+
+    def merge(self):
+        raise Exception("Multiple YML files?")
+
+    def get_from_docker(self, docker_tag):
+        result = subprocess.run(
+            ["docker", "run", docker_tag, "conda", "env", "export"], capture_output=True
+        )
+        self.textlines = result.stdout.decode().split("\n")
+
+    def clear_packages(self, package_names):
+        assert self.textlines is not None
+        line_id = 0
+        while line_id != len(self.textlines):
+            line = self.textlines[line_id]
+            lspl = line.split()
+            if len(lspl) > 1 and lspl[0] == "-":
+                lspl2 = lspl[1].split("=")
+                if lspl2[0] in package_names:
+                    del self.textlines[line_id]
+                    continue
+            line_id += 1
+
+    def dump_to_yml(self, yml_file=default_yml_file):
+        f = open(yml_file, "w")
+        print("\n".join(self.textlines), file=f)
+        f.close()
+
+
 dependency_constructors = {
     apt_flag: APTDependency,
     from_flag: FROMDependency,
     private_git_flag: PRIVATE_GIT,
     conda_flag: CondaDependency,
+    yml_flag: YMLDependency,
     pip_flag: PIPDependency,
 }
 
@@ -222,6 +276,11 @@ class Dependencies(dict):
         constructor = dependency_constructors[flag]
         new_deps = [constructor(str_def) for str_def in str_def_list]
         self.add_dependencies(flag, new_deps)
+
+    def import_yml_from_docker(self, docker_tag):
+        yml_dep = YMLDependency()
+        yml_dep.get_from_docker(docker_tag)
+        self.add_dependencies(yml_flag, [yml_dep])
 
 
 # for reading dependencies from a file

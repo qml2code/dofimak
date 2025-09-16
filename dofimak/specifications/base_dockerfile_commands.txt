@@ -1,3 +1,2 @@
-ENV PYTHONPATH /extra_modules:$PYTHONPATH
 VOLUME "/rundir"
 WORKDIR "/rundir"
