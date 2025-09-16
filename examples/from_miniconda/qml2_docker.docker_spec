@@ -1,3 +1,3 @@
 # Specifies a Dockerfile for using qml2.
 FROM continuumio/miniconda3:4.10.3-alpine
-PIP pyscf git+https://github.com/qml2code/qml2
+PIP pyscf qml2@git+https://github.com/qml2code/qml2

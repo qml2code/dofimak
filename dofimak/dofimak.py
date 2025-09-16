@@ -1,4 +1,6 @@
 """
+TODO: revise & update this comment
+
 Flags used to specify what should be included into the docker file. Flags after 'PARENT' are written in order in which commands are added to Dockerfile:
 PARENT      include everything from another `docker_spec` file. "Circular parenting" does not crash the code.
 FROM        which Docker to start from ("child" supercedes "parent")
@@ -10,8 +12,8 @@ PIPLAST     packages that should be additionally installed with PIP (e.g. qml's 
 CONDA       packages that should be installed with conda; provided in '${package name}${special_cond_separator}${conda channel}' format.
 PYTHONPATH  python modules installed by copy to PYTHONPATH.
 """
+# TODO check temp_dir deletion
 import os
-import platform
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
@@ -20,38 +22,31 @@ import click
 import tomli
 import tomli_w
 
+from .dependencies import (
+    APTDependency,
+    CondaDependency,
+    Dependencies,
+    DependenciesSublist,
+    PIPDependency,
+    alternative_github_url,
+    apt_flag,
+    conda_flag,
+    dependency_specifiers,
+    from_flag,
+    get_all_dependencies,
+    pip_flag,
+    private_git_flag,
+)
 from .passwd_checked_pip import (
     create_passwd_checked_pip_install,
     passwd_checked_pip_install_scrname,
 )
-from .specifications import dockerspec_filename, get_base_dockerfile_commands, get_list_wconda
-
-special_cond_separator = ";"
-
-parent_flag = "PARENT"
-pythonpath_flag = "PYTHONPATH"
-apt_flag = "APT"
-from_flag = "FROM"
-private_git_flag = "PRIVATE_GIT"
-pip_flag = "PIP"
-piplast_flag = "PIPLAST"
-
-dependency_specifiers = [
-    from_flag,
-    apt_flag,
-    "CONDAV",
-    "PYTHONV",
-    private_git_flag,
-    "CONDA",
-    pip_flag,
-    piplast_flag,
-    pythonpath_flag,
-]
+from .specifications import get_base_dockerfile_commands, get_list_wconda
+from .utils import check_bin_availability, get_safe_removal_command, no_safe_removal_warning
 
 # Command for normal shell operation.
 login_shell_command = 'SHELL ["/bin/bash", "--login", "-c"]'
 
-git_url_divisors = ["git+https", "git+ssh"]
 
 # Command for updating conda.
 conda_update_command = "RUN conda update -n base conda"
@@ -63,40 +58,9 @@ tmp_repo_src = "/tmp_repo_src"
 
 dockerfile_name = "Dockerfile"
 
-linux_safe_removal = "wipe"
-macos_safe_removal = "gwipe"
 
-
-def get_safe_removal_command():
-    match platform.system():
-        case "Linux":
-            return linux_safe_removal
-        case "Darwin":
-            return macos_safe_removal
-        case "Windows":
-            return None
-
-
-class BinaryUnavailable(Exception):
-    pass
-
-
-no_safe_removal_warning = f"""No utility for safe removal found (`{linux_safe_removal}` for Linux, `{macos_safe_removal}` for MacOS), making it impossible to wipe Dockerfile after it had been used. The Dockerfile in question will contain your private information and thus should be removed. If you are aware of the risks use the `--nowipe` flag to run the command without safely removing the Dockerfile."""
-
-
-def bin_available(exec_name):
-    return shutil.which(exec_name) is not None
-
-
-def check_bin_availability(exec_name, error_line=None):
-    if (exec_name is None) or (not bin_available(exec_name)):
-        if error_line is None:
-            error_line = f"Command not found: {exec_name}"
-        raise BinaryUnavailable(error_line)
-
-
-def check_login_kwargs(all_dependencies, nowipe=False, dockerfolder=False):
-    if (private_git_flag not in all_dependencies) or dockerfolder:
+def check_login_kwargs(all_dependencies: Dependencies, nowipe=False, dockerfolder=False):
+    if (not all_dependencies.contains_private()) or dockerfolder:
         return {}, False
     if not nowipe:
         safe_removal = get_safe_removal_command()
@@ -147,94 +111,64 @@ def conda_installation_lines(temporary_folder):
     return output
 
 
-def get_from_dep_lines(dep_list):
-    return ["FROM " + dep_list[0]]
+def get_from_dep_lines(dep_list: Dependencies):
+    return ["FROM " + dep_list[from_flag][0].install_str()]
 
 
-def get_apt_dep_lines(dep_list, **kwargs):
+def get_apt_dep_lines(dep_list: Dependencies[APTDependency], **kwargs):
     if not dep_list:
         return []
     l = "apt-get install -y"
     for dep in dep_list:
-        l += " " + dep
+        l += " " + dep.dep_name
     return combined_run(["apt-get update", l])
 
 
-def get_local_dependencies(docker_name, dockerspec_dirs=None, cwd=None):
-    spec_filename = dockerspec_filename(docker_name, dockerspec_dirs=dockerspec_dirs, cwd=cwd)
-    processed_lines = open(spec_filename, "r").readlines()
-    output = {}
-    for l in processed_lines:
-        lspl = l.split()
-        flag = lspl[0]
-        if not flag:
-            continue
-        if flag[0] == "#":
-            continue
-        assert (flag in dependency_specifiers) or (
-            flag == parent_flag
-        ), f"Dependency flag not found: {flag}"
-        if flag not in output:
-            output[flag] = []
-        output[flag] += lspl[1:]
-    return output
-
-
-def divide_conda_dep_str(dep_str: str):
-    dep_spl = dep_str.split(special_cond_separator)
-    package_name = dep_spl[0]
-    if len(dep_spl) > 1:
-        channel_name = dep_spl[1]
-    else:
-        channel_name = None
-    if len(dep_spl) > 2:
-        solver_name = dep_spl[2]
-    else:
-        solver_name = None
-    return package_name, channel_name, solver_name
-
-
-def get_conda_separate_package_installation(dep_list, no_conda_tos=False):
+def get_conda_separate_package_installation(
+    dep_list: DependenciesSublist[CondaDependency], no_conda_tos=False
+):
     if no_conda_tos:
         commands = []
     else:
         commands = ["conda tos accept"]
         added_channels = []
     for dep in dep_list:
-        package_name, channel_name, solver_name = divide_conda_dep_str(dep)
+        assert isinstance(dep, CondaDependency)
         channel_args = ""
-        if channel_name is not None:
-            channel_args = "-c " + channel_name + " "
-            if (not no_conda_tos) and (channel_name not in added_channels):
-                added_channels.append(channel_name)
+        if dep.channel_name is not None:
+            channel_args = "-c " + dep.channel_name + " "
+            if (not no_conda_tos) and (dep.channel_name not in added_channels):
+                added_channels.append(dep.channel_name)
                 # make sure TOS are accepted for newly added channels
                 commands += [
-                    "conda config --append channels " + channel_name,
-                    "conda tos accept --override-channels --channel " + channel_name,
+                    "conda config --append channels " + dep.channel_name,
+                    "conda tos accept --override-channels --channel " + dep.channel_name,
                 ]
-        if solver_name is not None:
-            channel_args += f"--solver={solver_name} "
-        commands.append("conda install " + channel_args + package_name)
+        if dep.solver_name is not None:
+            channel_args += f"--solver={dep.solver_name} "
+        commands.append("conda install " + channel_args + dep.name_wspecifier())
     return commands
 
 
-def get_conda_package_installation(dep_list, no_conda_tos=False):
+def get_conda_package_installation(
+    dep_list: DependenciesSublist[CondaDependency], no_conda_tos=False
+):
     installation_groups = {}
     if not no_conda_tos:
         added_channels = []
     for dep in dep_list:
-        package_name, channel_name, solver_name = divide_conda_dep_str(dep)
-        installation_group = (channel_name, solver_name)
+        assert isinstance(dep, CondaDependency)
+        installation_group = (dep.channel_name, dep.solver_name)
         if installation_group in installation_groups:
-            installation_groups[installation_group].append(package_name)
+            installation_groups[installation_group].append(dep.name_wspecifier())
         else:
-            installation_groups[installation_group] = [package_name]
+            installation_groups[installation_group] = [dep.name_wspecifier()]
         if (
             (not no_conda_tos)
-            and (channel_name is not None)
-            and (channel_name not in added_channels)
+            and (dep.channel_name is not None)
+            and (dep.channel_name not in added_channels)
         ):
-            added_channels.append(channel_name)
+            added_channels.append(dep.channel_name)
     if no_conda_tos:
         commands = []
     else:
@@ -242,40 +176,27 @@ def get_conda_package_installation(dep_list, no_conda_tos=False):
             "conda config --append channels " + " ".join(added_channels),
             "conda tos accept",
         ]
-    for (channel_name, solver_name), package_names in installation_groups.items():
+    for (channel_name, solver_name), names_wspecifiers in installation_groups.items():
         command = "conda install"
         if channel_name is not None:
             command += f" -c {channel_name}"
         if solver_name is not None:
             command += f" --solver={solver_name}"
-        commands.append(f"{command} " + " ".join(package_names))
+        commands.append(f"{command} " + " ".join(names_wspecifiers))
     return commands
 
 
-def get_conda_dep_lines(dep_list, no_conda_tos=False, separate_conda_deps=False, **kwargs):
+def get_conda_dep_lines(
+    dep_list: DependenciesSublist[CondaDependency],
+    no_conda_tos=False,
+    separate_conda_deps=False,
+    **kwargs,
+):
     if separate_conda_deps:
         commands = get_conda_separate_package_installation(dep_list, no_conda_tos=no_conda_tos)
     else:
         commands = get_conda_package_installation(dep_list, no_conda_tos=no_conda_tos)
     return combined_run(commands)
-
-
-def extract_github_info(dep):
-    spl_dep = dep.split("@")
-    last_field = spl_dep[-1]
-    if "/" in last_field:
-        branch = None
-        url_fields = spl_dep
-    else:
-        branch = last_field
-        url_fields = spl_dep[:-1]
-
-    url = "@".join(url_fields)
-
-    repo_name = url.split("/")[-1]
-    if repo_name[-4:] == ".git":
-        repo_name = repo_name[:-4]
-    return repo_name, url, branch
 
 
 def pip_install_line(comp, login=None, passwd=None, **other_kwargs):
@@ -291,10 +212,6 @@ def pip_install_line(comp, login=None, passwd=None, **other_kwargs):
     return l
 
 
-def is_github_link(dep):
-    return any([div in dep for div in git_url_divisors])
-
-
 def extract_pyproject_github_deps(cloned_dir):
     pyproject_toml_filename = cloned_dir + "/pyproject.toml"
     if not os.path.isfile(pyproject_toml_filename):
@@ -307,8 +224,8 @@ def extract_pyproject_github_deps(cloned_dir):
 
     dep_id = 0
     while dep_id != len(all_deps):
-        dep = all_deps[dep_id]
-        if is_github_link(dep):
+        dep = PIPDependency(all_deps[dep_id])
+        if dep.is_github_link:
             new_git_deps.append(dep)
             del all_deps[dep_id]
         else:
@@ -322,27 +239,18 @@ def extract_pyproject_github_deps(cloned_dir):
     return new_git_deps
 
 
-def github_link_from_url(repo_url):
-    # TODO: add more options here as needed.
-    for div in git_url_divisors:
-        if div in repo_url:
-            specifier = repo_url.split(".com")[1]
-            return "git@github.com:" + specifier
-    return repo_url
-
-
-def get_clone_command(repo_url, cloned_dir, branch=None):
+def get_clone_command(repo_url, cloned_folder, branch=None):
     clone_command = ["git", "clone"]
     if branch is not None:
         clone_command += ["--branch", branch]
-    return clone_command + [repo_url, cloned_dir]
+    return clone_command + [repo_url, cloned_folder]
 
 
-def clone_repo(repo_url, cloned_dir, branch=None):
-    repo_git_url = github_link_from_url(repo_url)
-    for url in [repo_git_url, repo_url]:
+def clone_repo(repo_url, cloned_folder, branch=None):
+    alt_repo_url = alternative_github_url(repo_url)
+    for url in [repo_url, alt_repo_url]:
         print("Attempting to clone:", url)
-        command = get_clone_command(url, cloned_dir, branch=branch)
+        command = get_clone_command(url, cloned_folder, branch=branch)
         completed_process = subprocess.run(command)
         if completed_process.returncode == 0:
             return
@@ -351,60 +259,43 @@ def clone_repo(repo_url, cloned_dir, branch=None):
     )
 
 
-def process_pip_github_dep(dep, dep_list, git_repo_branches, temp_dir, cloned_repos):
-    repo_name, url, branch = extract_github_info(dep)
-    cloned_dir = temp_dir + "/" + repo_name
-    if url in git_repo_branches:
-        assert git_repo_branches[url] == branch, "Branch mismatch in a repo dependency!"
-        return
-    else:
-        git_repo_branches[url] = branch
-    clone_repo(url, cloned_dir, branch=branch)
-    new_repo_deps = extract_pyproject_github_deps(cloned_dir)
-    for new_repo_dep in new_repo_deps:
-        dep_list.append(new_repo_dep)
-    cloned_repos.append(repo_name)
-    return f"{tmp_repo_src}/{repo_name}"
+def process_pip_cloned_github_dep(dep: PIPDependency, temp_dir):
+    cloned_folder = f"{temp_dir}/{dep.package_name}"
+    clone_repo(dep.url, cloned_folder, branch=dep.branch)
+    new_repo_deps = extract_pyproject_github_deps(cloned_folder)
+    return f"{tmp_repo_src}/{dep.package_name}", cloned_folder, new_repo_deps
 
 
-def pip_predownload_adjusted_list(dep_list, temp_dir):
-    assert temp_dir is not None
+def get_pip_dep_lines(
+    dep_list: DependenciesSublist[PIPDependency], dockerfolder=False, temp_dir=None, **kwargs
+):
+    install_strings = []
+    if dockerfolder:
+        copy_folder_tuples = []
     dep_id = 0
-    revised_dep_list = []
-    git_repo_branches = {}
-    cloned_repos = []
     while dep_id != len(dep_list):
         dep = dep_list[dep_id]
-        if is_github_link(dep):
-            dep = process_pip_github_dep(dep, dep_list, git_repo_branches, temp_dir, cloned_repos)
-        if dep is not None:
-            revised_dep_list.append(dep)
-        dep_id += 1
-    return revised_dep_list, cloned_repos
-
-
-def get_pip_dep_lines(dep_list, dockerfolder=False, temp_dir=None, **kwargs):
-    if dockerfolder:
-        dep_list, cloned_repos = pip_predownload_adjusted_list(dep_list, temp_dir)
-    no_special_flags = []
-    wspecial_flags = []
-    for dep in dep_list:
-        if special_cond_separator in dep:
-            wspecial_flags.append(dep)
+        if dep.is_github_link:
+            if dockerfolder:
+                dep_install_str, cloned_folder, new_repo_deps = process_pip_cloned_github_dep(
+                    dep, temp_dir
+                )
+                copy_folder_tuple = (dep_install_str, cloned_folder)
+                assert copy_folder_tuple not in copy_folder_tuples
+                copy_folder_tuples.append((cloned_folder, dep_install_str))
+                dep_list.add_dependencies(new_repo_deps)
+            else:
+                dep_install_str = dep.install_str_wtoken()
         else:
-            no_special_flags.append(dep)
-    lines = []
-    if no_special_flags:
-        lines.append(pip_install_line(no_special_flags, dockerfolder=dockerfolder, **kwargs))
-    if wspecial_flags:
-        for dep in wspecial_flags:
-            dep_spl = dep.split(special_cond_separator)
-            lines.append(pip_install_line(dep_spl, **kwargs))
+            dep_install_str = dep.install_str()
+        install_strings.append(dep_install_str)
+        dep_id += 1
+    lines = [pip_install_line(install_strings, **kwargs)]
     if dockerfolder:
         lines += [f"rm -Rf {tmp_repo_src}"]
         copy_commands = [
-            f"COPY {temp_dir}/{cloned_repo} {tmp_repo_src}/{cloned_repo}"
-            for cloned_repo in cloned_repos
+            f"COPY {cloned_folder} {dep_install_str}"
+            for cloned_folder, dep_install_str in copy_folder_tuples
         ]
 
     commands = combined_run(lines)
@@ -457,37 +348,15 @@ def get_private_git_dep_lines(dummy_arg, temp_dir=".", dockerfolder=False, **kwa
 dependency_line_dict = {
     from_flag: get_from_dep_lines,
     apt_flag: get_apt_dep_lines,
-    "CONDA": get_conda_dep_lines,
+    conda_flag: get_conda_dep_lines,
     pip_flag: get_pip_dep_lines,
-    piplast_flag: get_pip_dep_lines,
-    pythonpath_flag: get_pythonpath_dep_lines,
-    "CONDAV": get_conda_version_specification,
-    "PYTHONV": get_python_version_specification,
     private_git_flag: get_private_git_dep_lines,
 }
 
 
-def get_all_dependencies(docker_name, dockerspec_dirs=None, cwd=None):
-    cur_imported_id = 0
-    dep_dict = {parent_flag: [docker_name]}
-    while cur_imported_id != len(dep_dict[parent_flag]):
-        to_add = get_local_dependencies(
-            dep_dict[parent_flag][cur_imported_id], dockerspec_dirs=dockerspec_dirs, cwd=cwd
-        )
-        for dep_type, dep_list in to_add.items():
-            if dep_type not in dep_dict:
-                dep_dict[dep_type] = []
-            for dep in dep_list:
-                if dep not in dep_dict[dep_type]:
-                    dep_dict[dep_type].append(dep)
-        cur_imported_id += 1
-    del dep_dict[parent_flag]
-    return dep_dict
-
-
-def contains_git_repos(dependency_list):
+def contains_git_repos(dependency_list: DependenciesSublist[PIPDependency]):
     for dep in dependency_list:
-        if (len(dep) > 3) and (dep[:3] == "git"):
+        if dep.url is not None:
             return True
     return False
 
@@ -499,35 +368,32 @@ def get_deps(all_dependencies, flag):
         return []
 
 
-def check_dependency_consistency(all_dependencies, temp_dir=".", nowipe=False, dockerfolder=False):
+def check_dependency_consistency(
+    all_dependencies: Dependencies, temp_dir=".", nowipe=False, dockerfolder=False
+):
     kwargs, is_private = check_login_kwargs(
         all_dependencies, nowipe=nowipe, dockerfolder=dockerfolder
     )
     if is_private:
         kwargs["temp_dir"] = temp_dir
     pip_deps = get_deps(all_dependencies, pip_flag)
-    piplast_deps = get_deps(all_dependencies, pip_flag)
-    if pip_deps or piplast_deps:
-        if apt_flag not in all_dependencies:
-            all_dependencies[apt_flag] = []
-        if (
-            (contains_git_repos(pip_deps) or contains_git_repos(piplast_deps))
-            and ("git" not in all_dependencies[apt_flag])
-            and (not dockerfolder)
-        ):
-            all_dependencies[apt_flag].append("git")
+    if pip_deps:
+        if contains_git_repos(pip_deps) and (not dockerfolder):
+            all_dependencies.add_dependencies_from_strs(apt_flag, ["git"])
     return kwargs, is_private
 
 
-def docker_contains_conda(docker_name, conda_present=False, dockerspec_dirs=None, cwd=None):
+def docker_contains_conda(
+    all_dependencies: Dependencies, conda_present=False, dockerspec_dirs=None, cwd=None
+):
     if conda_present:
         return False
-    notag_name = docker_name.split(":")[0]
+    notag_name = all_dependencies.from_docker().dep_name
     return notag_name not in get_list_wconda(dockerspec_dirs=dockerspec_dirs, cwd=cwd)
 
 
 def get_dockerfile_lines_deps(
-    docker_name,
+    all_dependencies: Dependencies,
     dockerspec_dirs=None,
     conda_updated=False,
     nowipe=False,
@@ -545,7 +411,6 @@ def get_dockerfile_lines_deps(
         temp_dir_obj = TemporaryDirectory(dir=".", delete=False)
         temp_dir = os.path.basename(temp_dir_obj.name)
     # Docker-specific dependencies.
-    all_dependencies = get_all_dependencies(docker_name, dockerspec_dirs=dockerspec_dirs, cwd=cwd)
     kwargs, is_private = check_dependency_consistency(
         all_dependencies, temp_dir=temp_dir, nowipe=nowipe, dockerfolder=dockerfolder
     )
@@ -556,15 +421,15 @@ def get_dockerfile_lines_deps(
         "dockerfolder": dockerfolder,
         "temp_dir": temp_dir,
     }
-    if from_flag not in all_dependencies:
+    if not all_dependencies.contains_from():
         raise Exception("Need a base Docker.")
-    output = get_from_dep_lines(all_dependencies[from_flag])
+    output = get_from_dep_lines(all_dependencies)
     output += get_base_dockerfile_commands(dockerspec_dirs=dockerspec_dirs)
 
     # Commands run once we set up apt-installable components.
     post_apt_commands = [login_shell_command]
     if docker_contains_conda(
-        all_dependencies[from_flag][0],
+        all_dependencies,
         dockerspec_dirs=dockerspec_dirs,
         cwd=cwd,
         conda_present=conda_present,
@@ -578,22 +443,14 @@ def get_dockerfile_lines_deps(
     if apt_flag not in all_dependencies:
         output += post_apt_commands
 
-    for dep_spec in dependency_specifiers[1:-1]:
+    for dep_spec in dependency_specifiers[1:]:
         if dep_spec not in all_dependencies:
             continue
         output += dependency_line_dict[dep_spec](all_dependencies[dep_spec], **kwargs)
         if dep_spec == apt_flag:
             output += post_apt_commands
 
-    if pythonpath_flag in all_dependencies:
-        copy_reqs = all_dependencies[pythonpath_flag]
-        output += dependency_line_dict[pythonpath_flag](
-            all_dependencies[pythonpath_flag], temp_dir
-        )
-    else:
-        copy_reqs = []
-        temp_dir = None
-    return output, copy_reqs, temp_dir, is_private
+    return output, temp_dir, is_private
 
 
 def prepare_dockerfile(
@@ -606,8 +463,9 @@ def prepare_dockerfile(
     cwd=None,
     conda_present=False,
 ):
-    dlines, copy_reqs, temp_dir, private = get_dockerfile_lines_deps(
-        docker_name,
+    all_dependencies = get_all_dependencies(docker_name, dockerspec_dirs=dockerspec_dirs, cwd=cwd)
+    dlines, temp_dir, private = get_dockerfile_lines_deps(
+        all_dependencies,
         dockerspec_dirs=dockerspec_dirs,
         nowipe=nowipe,
         no_conda_tos=no_conda_tos,
@@ -620,9 +478,6 @@ def prepare_dockerfile(
     for l in dlines:
         print(l, file=output)
     output.close()
-    if temp_dir is not None:
-        for copy_req in copy_reqs:
-            subprocess.run(["cp", "-r", get_module_imported_dir(copy_req), temp_dir])
     return temp_dir, private
 
 
