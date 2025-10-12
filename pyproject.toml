@@ -10,12 +10,13 @@ authors = [
 ]
 dependencies = [
     "click",
-    "pyprojectsort",
+    "tomli",
+    "tomli-w",
 ]
 description = "Convenient dockerfile creation"
 name = "dofimak"
 readme = "README.md"
-version = "0.0.4"
+version = "0.0.5"
 
 [project.license]
 text = "MIT License"
