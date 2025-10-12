@@ -135,7 +135,7 @@ class CondaChannelDependency(CondaDependency):
 def alternative_github_url(repo_url):
     # TODO: add more options here as needed.
     specifier = repo_url.split(".com")[1]
-    if "https://github.com" in repo_url:
+    if ("https://github.com" in repo_url) or ("https://git@github.com" in repo_url):
         return "git@github.com:" + specifier
     elif "git+ssh" in repo_url:
         return "https://github.com/" + specifier
