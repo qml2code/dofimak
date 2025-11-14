@@ -92,7 +92,7 @@ class CondaEnvDependency(Dependency):
     def name_wspecifier(self):
         output = self.package_name
         if self.specifier is not None:
-            output += str(self.specifier)
+            output = f'"{output}{self.specifier}"'
         return output
 
 
