@@ -525,9 +525,11 @@ def attempt_safe_removal(dockerfile_name):
     subprocess.run([safe_removal, dockerfile_name])
 
 
-def build_image(docker_name, docker_tag=None, verbose=False):
+def build_image(docker_name, docker_tag=None, verbose=False, sudo_docker=False):
     check_bin_availability("docker")
     docker_build_command = ["docker", "image", "build"]
+    if sudo_docker:
+        docker_build_command = ["sudo"] + docker_build_command
     if docker_tag is None:
         docker_tag = f"{docker_name}:1.0"
     docker_build_command += ["-t", docker_tag]
@@ -578,6 +580,7 @@ def redefine_through_yml(
     dockerspec_dirs=None,
     no_conda_tos=False,
     conda_present=False,
+    sudo_docker=False,
 ):
     """
     Make a Docker build directory such that the conda environment is defined through a *.yml file.
@@ -594,7 +597,9 @@ def redefine_through_yml(
         all_dependencies, temp_dir=temp_dir
     )
     # build the docker and export the environment from it.
-    _, docker_tag = build_image(docker_name, docker_tag=docker_tag, verbose=verbose)
+    _, docker_tag = build_image(
+        docker_name, docker_tag=docker_tag, verbose=verbose, sudo_docker=sudo_docker
+    )
     print(f"*WARNING*: A TEMPORARY DOCKER HAS BEEN BUILT: {docker_tag}")
     filtered_dependencies.import_yml_from_docker(docker_tag)
 
@@ -623,6 +628,7 @@ def prepare_image(
     no_conda_tos=False,
     separate_conda_deps=False,
     conda_present=False,
+    sudo_docker=False,
 ):
     _, temp_dir, is_private = prepare_dockerfile(
         docker_name,
@@ -633,7 +639,7 @@ def prepare_image(
         conda_present=conda_present,
     )
     print("CREATING THE DOCKER")
-    build_image(docker_name, docker_tag=docker_tag, verbose=verbose)
+    build_image(docker_name, docker_tag=docker_tag, verbose=verbose, sudo_docker=sudo_docker)
     print("CLEANING UP.")
     if is_private:
         if nowipe:
@@ -657,6 +663,7 @@ def prepare_image(
 @click.option("--separate_conda_deps", is_flag=True)
 @click.option("--conda_present", is_flag=True)
 @click.option("--yml_env_definition", is_flag=True)
+@click.option("--sudo_docker", is_flag=True)
 def main(
     docker_name,
     tag,
@@ -668,6 +675,7 @@ def main(
     separate_conda_deps,
     conda_present,
     yml_env_definition,
+    sudo_docker,
 ):
     common_kwargs = {
         "no_conda_tos": no_conda_tos,
@@ -700,7 +708,15 @@ def main(
                 temp_dir=temp_dir,
                 conda_present=conda_present,
                 no_conda_tos=no_conda_tos,
+                sudo_docker=sudo_docker,
             )
         os.chdir("..")
         return
-    prepare_image(docker_name, docker_tag=tag, nowipe=nowipe, verbose=verbose, **common_kwargs)
+    prepare_image(
+        docker_name,
+        docker_tag=tag,
+        nowipe=nowipe,
+        verbose=verbose,
+        sudo_docker=sudo_docker,
+        **common_kwargs,
+    )
